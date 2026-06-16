@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Server } from "http";
 import { createHttpApp, buildAllowedHosts } from "./http.js";
 
@@ -79,9 +79,15 @@ describe("HTTP transport configuration", () => {
         },
       });
 
-      // cors middleware rejects with no ACAO header (and typically 500/204
-      // depending on version). The assertion is that no Origin is reflected.
+      // Rejected preflights must not reflect the requesting Origin and must
+      // return an explicit 403 with a JSON-RPC error body (not a generic 500).
       expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+      expect(preflight.status).toBe(403);
+      const body = await preflight.json();
+      expect(body).toMatchObject({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Origin not allowed" },
+      });
     });
 
     it("allows an explicitly allowlisted origin", async () => {
@@ -114,6 +120,7 @@ describe("HTTP transport configuration", () => {
       });
 
       expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+      expect(preflight.status).toBe(403);
     });
 
     it("rejects Origin: null by default", async () => {
@@ -129,6 +136,7 @@ describe("HTTP transport configuration", () => {
       });
 
       expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+      expect(preflight.status).toBe(403);
     });
 
     it("allows Origin: null only when explicitly opted in", async () => {
@@ -162,6 +170,63 @@ describe("HTTP transport configuration", () => {
       expect(preflight.headers.get("access-control-allow-origin")).toBe(
         "https://anything.example",
       );
+    });
+  });
+
+  describe("Startup banners", () => {
+    // These banners must appear at the default log level (ERROR), not just
+    // when PERPLEXITY_LOG_LEVEL=WARN. We assert by spying on console.error.
+    it("emits a banner when BIND_ADDRESS is 0.0.0.0", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        createHttpApp({
+          port: 8080,
+          bindAddress: "0.0.0.0",
+          allowedOrigins: [],
+          allowedHosts: buildAllowedHosts(8080, []),
+        });
+        const calls = spy.mock.calls.map((c) => String(c[0]));
+        expect(calls.some((m) => m.includes("BIND_ADDRESS=0.0.0.0"))).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("emits a banner when ALLOWED_ORIGINS contains *", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        createHttpApp({
+          port: 8080,
+          bindAddress: "127.0.0.1",
+          allowedOrigins: ["*"],
+          allowedHosts: buildAllowedHosts(8080, []),
+        });
+        const calls = spy.mock.calls.map((c) => String(c[0]));
+        expect(calls.some((m) => m.includes("ALLOWED_ORIGINS"))).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("emits no banner under the safe defaults", () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        createHttpApp({
+          port: 8080,
+          bindAddress: "127.0.0.1",
+          allowedOrigins: [],
+          allowedHosts: buildAllowedHosts(8080, []),
+        });
+        const calls = spy.mock.calls.map((c) => String(c[0]));
+        expect(
+          calls.some(
+            (m) =>
+              m.includes("BIND_ADDRESS=") || m.includes("ALLOWED_ORIGINS"),
+          ),
+        ).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 

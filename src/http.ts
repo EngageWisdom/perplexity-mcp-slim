@@ -21,15 +21,17 @@ export function createHttpApp(options: HttpAppOptions): Express {
   const { port, bindAddress, allowedOrigins, allowedHosts } = options;
   const allowsAllOrigins = allowedOrigins.includes("*");
 
+  // One-shot startup banners. Written directly to stderr (bypassing the
+  // level-gated logger) so they are visible at the default log level.
   if (bindAddress === "0.0.0.0" || bindAddress === "::") {
-    logger.warn(
-      `BIND_ADDRESS=${bindAddress} exposes the server on all network ` +
-        `interfaces. See SECURITY.md.`,
+    console.error(
+      `[mcp-server] BIND_ADDRESS=${bindAddress} exposes the server on all ` +
+        `network interfaces. See SECURITY.md.`,
     );
   }
   if (allowsAllOrigins) {
-    logger.warn(
-      `ALLOWED_ORIGINS contains "*". See SECURITY.md.`,
+    console.error(
+      `[mcp-server] ALLOWED_ORIGINS contains "*". See SECURITY.md.`,
     );
   }
 
@@ -53,6 +55,15 @@ export function createHttpApp(options: HttpAppOptions): Express {
     next();
   });
 
+  // Sentinel error type so the CORS error handler can distinguish disallowed-
+  // origin rejections from other downstream errors.
+  class CorsOriginNotAllowedError extends Error {
+    constructor(public readonly origin: string) {
+      super(`Origin ${origin} not allowed by CORS`);
+      this.name = "CorsOriginNotAllowedError";
+    }
+  }
+
   // CORS configuration for browser-based MCP clients.
   //   - A missing Origin header (same-origin or non-browser caller) is allowed.
   //   - A literal "null" Origin requires explicit opt-in via ALLOWED_ORIGINS.
@@ -66,7 +77,7 @@ export function createHttpApp(options: HttpAppOptions): Express {
           if (allowedOrigins.includes("null")) {
             return callback(null, true);
           }
-          return callback(new Error("Origin null not allowed by CORS"));
+          return callback(new CorsOriginNotAllowedError("null"));
         }
 
         if (allowsAllOrigins) {
@@ -77,11 +88,38 @@ export function createHttpApp(options: HttpAppOptions): Express {
           return callback(null, true);
         }
 
-        return callback(new Error(`Origin ${origin} not allowed by CORS`));
+        return callback(new CorsOriginNotAllowedError(origin));
       },
       exposedHeaders: ["Mcp-Session-Id", "mcp-protocol-version"],
       allowedHeaders: ["Content-Type", "mcp-session-id"],
     }),
+  );
+
+  // Translate CORS origin-rejection errors into an explicit 403 with a
+  // JSON-RPC error body, mirroring the 421 emitted by the Host check. This
+  // runs immediately after the cors middleware so other errors still fall
+  // through to Express's default handler unchanged.
+  app.use(
+    (
+      err: Error,
+      req: express.Request,
+      res: express.Response,
+      next: express.NextFunction,
+    ) => {
+      if (err instanceof CorsOriginNotAllowedError) {
+        logger.warn("Rejected request with disallowed Origin", {
+          origin: err.origin,
+          path: req.path,
+        });
+        res.status(403).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Origin not allowed" },
+          id: null,
+        });
+        return;
+      }
+      next(err);
+    },
   );
 
   app.use(express.json());
@@ -177,11 +215,13 @@ function main(): void {
 
   app
     .listen(PORT, BIND_ADDRESS, () => {
-      logger.info(
-        `Perplexity MCP Server listening on http://${BIND_ADDRESS}:${PORT}/mcp`,
+      // Startup banner — written directly to stderr so it is visible at the
+      // default log level.
+      console.error(
+        `[mcp-server] listening on http://${BIND_ADDRESS}:${PORT}/mcp`,
       );
-      logger.info(
-        `Allowed origins: ${
+      console.error(
+        `[mcp-server] allowed origins: ${
           ALLOWED_ORIGINS.length > 0
             ? ALLOWED_ORIGINS.join(", ")
             : "(none — cross-origin browser requests will be rejected)"
