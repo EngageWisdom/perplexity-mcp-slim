@@ -306,12 +306,10 @@ export function createPerplexityServer(serviceOrigin?: string) {
     },
     {
       instructions:
-        "Perplexity AI server for web-grounded search, research, and reasoning. " +
-        "Use perplexity_search for finding URLs, facts, and recent news. " +
-        "Use perplexity_ask for quick AI-answered questions with citations. Supports recency filters, domain restrictions, and search context size control. " +
+        "Perplexity AI server for web-grounded search and research (slim build — only search and research tools exposed). " +
+        "Use perplexity_search for fast web search: finding URLs, facts, and recent news. Supports recency filters, domain restrictions, and search context size control. " +
         "Use perplexity_research for in-depth multi-source investigation (slow, 30s+). Supports reasoning_effort parameter to control depth. " +
-        "Use perplexity_reason for complex analysis requiring step-by-step logic. Supports recency filters, domain restrictions, and search context size control. " +
-        "All tools are read-only and access live web data.",
+        "Both tools are read-only and access live web data.",
     }
   );
 
@@ -362,55 +360,14 @@ export function createPerplexityServer(serviceOrigin?: string) {
   };
 
   server.registerTool(
-    "perplexity_ask",
-    {
-      title: "Ask Perplexity",
-      description: "Answer a question using web-grounded AI (Sonar Pro model). " +
-        "Best for: quick factual questions, summaries, explanations, and general Q&A. " +
-        "Returns a text response with numbered citations. Fastest and cheapest option. " +
-        "Supports filtering by recency (hour/day/week/month/year), domain restrictions, and search context size. " +
-        "For in-depth multi-source research, use perplexity_research instead. " +
-        "For step-by-step reasoning and analysis, use perplexity_reason instead.",
-      inputSchema: messagesOnlyInputSchema as any,
-      outputSchema: responseOutputSchema as any,
-      annotations: {
-        readOnlyHint: true,
-        openWorldHint: true,
-        idempotentHint: false,
-        destructiveHint: false,
-      },
-    },
-    async (args: any) => {
-      const { messages, search_recency_filter, search_domain_filter, search_context_size } = args as { 
-        messages: Message[];
-        search_recency_filter?: "hour" | "day" | "week" | "month" | "year";
-        search_domain_filter?: string[];
-        search_context_size?: "low" | "medium" | "high";
-      };
-      validateMessages(messages, "perplexity_ask");
-      const options = {
-        ...(search_recency_filter && { search_recency_filter }),
-        ...(search_domain_filter && { search_domain_filter }),
-        ...(search_context_size && { search_context_size }),
-      };
-      const result = await performChatCompletion(messages, "sonar-pro", false, serviceOrigin, Object.keys(options).length > 0 ? options : undefined);
-      return {
-        content: [{ type: "text" as const, text: result }],
-        structuredContent: { response: result },
-      };
-    }
-  );
-
-  server.registerTool(
     "perplexity_research",
     {
       title: "Deep Research",
       description: "Conduct deep, multi-source research on a topic (Sonar Deep Research model). " +
         "Best for: literature reviews, comprehensive overviews, investigative queries needing " +
         "many sources. Returns a detailed response with numbered citations. " +
-        "Significantly slower than other tools (30+ seconds). " +
-        "For quick factual questions, use perplexity_ask instead. " +
-        "For logical analysis and reasoning, use perplexity_reason instead.",
+        "Significantly slower than perplexity_search (30+ seconds). " +
+        "For fast fact-finding or URL discovery, use perplexity_search instead.",
       inputSchema: researchInputSchema as any,
       outputSchema: responseOutputSchema as any,
       annotations: {
@@ -439,48 +396,6 @@ export function createPerplexityServer(serviceOrigin?: string) {
     }
   );
 
-  server.registerTool(
-    "perplexity_reason",
-    {
-      title: "Advanced Reasoning",
-      description: "Analyze a question using step-by-step reasoning with web grounding (Sonar Reasoning Pro model). " +
-        "Best for: math, logic, comparisons, complex arguments, and tasks requiring chain-of-thought. " +
-        "Returns a reasoned response with numbered citations. " +
-        "Supports filtering by recency (hour/day/week/month/year), domain restrictions, and search context size. " +
-        "For quick factual questions, use perplexity_ask instead. " +
-        "For comprehensive multi-source research, use perplexity_research instead.",
-      inputSchema: messagesWithStripThinkingInputSchema as any,
-      outputSchema: responseOutputSchema as any,
-      annotations: {
-        readOnlyHint: true,
-        openWorldHint: true,
-        idempotentHint: false,
-        destructiveHint: false,
-      },
-    },
-    async (args: any) => {
-      const { messages, strip_thinking, search_recency_filter, search_domain_filter, search_context_size } = args as { 
-        messages: Message[];
-        strip_thinking?: boolean;
-        search_recency_filter?: "hour" | "day" | "week" | "month" | "year";
-        search_domain_filter?: string[];
-        search_context_size?: "low" | "medium" | "high";
-      };
-      validateMessages(messages, "perplexity_reason");
-      const stripThinking = typeof strip_thinking === "boolean" ? strip_thinking : false;
-      const options = {
-        ...(search_recency_filter && { search_recency_filter }),
-        ...(search_domain_filter && { search_domain_filter }),
-        ...(search_context_size && { search_context_size }),
-      };
-      const result = await performChatCompletion(messages, "sonar-reasoning-pro", stripThinking, serviceOrigin, Object.keys(options).length > 0 ? options : undefined);
-      return {
-        content: [{ type: "text" as const, text: result }],
-        structuredContent: { response: result },
-      };
-    }
-  );
-
   const searchInputSchema = {
     query: z.string().describe("Search query string"),
     max_results: z.number().min(1).max(20).optional()
@@ -502,7 +417,7 @@ export function createPerplexityServer(serviceOrigin?: string) {
       description: "Search the web and return a ranked list of results with titles, URLs, snippets, and dates. " +
         "Best for: finding specific URLs, checking recent news, verifying facts, discovering sources. " +
         "Returns formatted results (title, URL, snippet, date) — no AI synthesis. " +
-        "For AI-generated answers with citations, use perplexity_ask instead.",
+        "For deep multi-source synthesis, use perplexity_research instead.",
       inputSchema: searchInputSchema as any,
       outputSchema: searchOutputSchema as any,
       annotations: {
