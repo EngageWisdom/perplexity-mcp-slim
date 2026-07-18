@@ -1,163 +1,193 @@
+# perplexity-mcp-slim — EngageWisdom fork
+
+A trimmed fork of the [official Perplexity MCP server](https://github.com/perplexityai/modelcontextprotocol) (`@perplexity-ai/mcp-server`) that advertises only two tools:
+
+- `perplexity_search` — fast web search with citations
+- `perplexity_research` — deep multi-source investigation
+
+The upstream `perplexity_ask` and `perplexity_reason` tools are **removed from the MCP tool list entirely**, so agents can't discover or reach for them. Removing tools at the source is the only filter that works uniformly across Cursor, Claude Code, Cline, and Codex. Behavioral rules ("do not use") drift; per-agent permission filters need four separate configs; skills don't hide tools.
+
+Everything else in this fork is byte-identical to upstream. Same protocol, same HTTP transport, same tests, same license (MIT).
+
+---
+
+## Install (once per machine)
+
+```bash
+git clone https://github.com/EngageWisdom/perplexity-mcp-slim.git ~/perplexity-mcp-slim
+cd ~/perplexity-mcp-slim && npm install
+```
+
+`npm install` runs the `prepare` script which builds `dist/`. Verify `~/perplexity-mcp-slim/dist/index.js` exists.
+
+Template 10's `verify-template_10-*.py --yes` scripts will do this for you automatically on any machine where the fork is missing, and will also switch any agent MCP config still pointing at the upstream npm package to point at this fork instead.
+
+---
+
+## Configure your MCP client
+
+Point each agent's MCP config at the built entry file. Absolute path required — MCP clients do not expand `~`:
+
+```json
+"perplexity": {
+  "command": "node",
+  "args": ["/Users/YOURNAME/perplexity-mcp-slim/dist/index.js"],
+  "env": {"PERPLEXITY_API_KEY": "pplx-..."}
+}
+```
+
+For Codex (TOML):
+
+```toml
+[mcp_servers.perplexity]
+command = "node"
+args = ["/Users/YOURNAME/perplexity-mcp-slim/dist/index.js"]
+env = {PERPLEXITY_API_KEY = "pplx-..."}
+```
+
+The exact paths for each agent's config file are in [`template_10/mcp_setup/README.md`](https://github.com/EngageWisdom/) (EW-internal — same file also covers the auto-switch behavior).
+
+---
+
+## What differs from upstream
+
+Only `src/server.ts` is modified. The changes are:
+
+1. **Removed** the entire `server.registerTool("perplexity_ask", ...)` block (~40 lines).
+2. **Removed** the entire `server.registerTool("perplexity_reason", ...)` block (~40 lines).
+3. **Rewrote** the server-info `instructions` blob near the top of `createPerplexityServer(...)` to describe only the two remaining tools.
+4. **Rewrote** the cross-reference lines in the descriptions of `perplexity_search` and `perplexity_research` (they used to say "use `perplexity_ask` instead" — now they point at each other).
+
+That's it. All other server code, tools, HTTP handling, validation, and tests are untouched.
+
+Compare against upstream directly:
+
+```bash
+git diff upstream/main..main -- src/server.ts
+```
+
+---
+
+## Update from upstream
+
+Upstream (`perplexityai/modelcontextprotocol`) releases new versions periodically. To pull an update:
+
+### 1. Fetch and merge upstream
+
+```bash
+cd ~/perplexity-mcp-slim
+git fetch upstream
+git merge upstream/main
+```
+
+**Expected outcome:** a merge conflict inside `src/server.ts`. The conflict markers will land almost entirely on the two tool blocks that this fork removes and on the descriptions this fork rewrote. Nothing else should conflict in a routine upstream release.
+
+### 2. Re-apply the fork's removals
+
+Open `src/server.ts` and, for each conflict block:
+
+- **If the conflict is inside a `server.registerTool("perplexity_ask", ...)` or `server.registerTool("perplexity_reason", ...)` block** — take **"ours" (delete the block entirely)**. Both `<<<<<<< HEAD` and `=======` sides are gone; the entire `server.registerTool(...);` call is removed.
+- **If the conflict is inside the `instructions:` string at the top of `createPerplexityServer(...)`** — keep "ours" version (the shorter one that mentions only `perplexity_search` and `perplexity_research`).
+- **If the conflict is inside the `description:` field of `perplexity_search` or `perplexity_research` registerTool blocks** — keep "ours" version (the one whose cross-reference points at the other allowed tool, not at `perplexity_ask` or `perplexity_reason`).
+- **Any other conflict** — read the upstream change carefully. It is probably a genuine improvement to keep. Take "theirs" unless it reintroduces a removed tool.
+
+After resolving, confirm no `perplexity_ask` or `perplexity_reason` references remain:
+
+```bash
+grep -nE 'perplexity_(ask|reason)' src/server.ts
+```
+
+Expected output: **zero lines**.
+
+### 3. Rebuild and verify
+
+```bash
+npm install    # runs prepare script → tsc → chmod dist/*.js
+```
+
+Confirm the compiled dist advertises exactly the two tools:
+
+```bash
+PERPLEXITY_API_KEY=dummy node -e "
+const { spawn } = require('child_process');
+const p = spawn('node', ['dist/index.js'], { stdio: ['pipe', 'pipe', 'inherit'] });
+let out = '';
+p.stdout.on('data', d => out += d.toString());
+const send = o => p.stdin.write(JSON.stringify(o) + '\n');
+send({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'t',version:'1'}}});
+send({jsonrpc:'2.0',method:'notifications/initialized'});
+send({jsonrpc:'2.0',id:2,method:'tools/list',params:{}});
+setTimeout(() => {
+  for (const l of out.split('\n').filter(Boolean)) {
+    try { const m = JSON.parse(l); if (m.id===2) console.log('TOOLS:', m.result.tools.map(t=>t.name).join(', ')); } catch(e) {}
+  }
+  p.kill(); process.exit(0);
+}, 1500);
+"
+```
+
+**Expected output:** `TOOLS: perplexity_research, perplexity_search` (exactly two, in either order).
+
+If more than two tools appear, the removal wasn't complete — re-check step 2 and re-run step 3.
+
+### 4. Commit and push
+
+```bash
+git add src/server.ts
+git commit -m "Re-remove perplexity_ask and perplexity_reason after upstream merge to <upstream-tag>"
+git push origin main
+```
+
+### 5. Restart your MCP agents
+
+Each agent (Cursor, Claude Code, Cline, Codex) needs a full quit + relaunch to reload the MCP server. In each agent, verify **Settings → MCP** (or equivalent) shows the `perplexity` server with exactly two tools.
+
+**Estimated total time per upstream release: 5–10 minutes.**
+
+---
+
+## Upstream remote setup
+
+If you cloned this fork directly, add the upstream remote so `git fetch upstream` works:
+
+```bash
+cd ~/perplexity-mcp-slim
+git remote add upstream https://github.com/perplexityai/modelcontextprotocol.git
+git fetch upstream
+```
+
+Check it stuck:
+
+```bash
+git remote -v
+# origin    https://github.com/EngageWisdom/perplexity-mcp-slim.git (fetch)
+# origin    https://github.com/EngageWisdom/perplexity-mcp-slim.git (push)
+# upstream  https://github.com/perplexityai/modelcontextprotocol.git (fetch)
+# upstream  https://github.com/perplexityai/modelcontextprotocol.git (push)
+```
+
+---
+
+## License
+
+MIT (inherited from upstream). See [LICENSE](LICENSE). Upstream authorship and copyright preserved.
+
+---
+
+# Upstream README (below)
+
+Everything below this line is the upstream `@perplexity-ai/mcp-server` README, kept verbatim for reference. Note that the badges, install commands, and tool descriptions there reference the full four-tool upstream package, not this slim fork.
+
+---
+
 # Perplexity API Platform MCP Server
 
 [![Install in Cursor](https://custom-icon-badges.demolab.com/badge/Install_in_Cursor-000000?style=for-the-badge&logo=cursor-ai-white)](https://cursor.com/en/install-mcp?name=perplexity&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBwZXJwbGV4aXR5LWFpL21jcC1zZXJ2ZXIiXSwiZW52Ijp7IlBFUlBMRVhJVFlfQVBJX0tFWSI6IiJ9fQ==)
 &nbsp;
 [![Install in VS Code](https://custom-icon-badges.demolab.com/badge/Install_in_VS_Code-007ACC?style=for-the-badge&logo=vsc&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=perplexity&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40perplexity-ai%2Fmcp-server%22%5D%2C%22env%22%3A%7B%22PERPLEXITY_API_KEY%22%3A%22%22%7D%7D)
 &nbsp;
-[![Add to Kiro](https://img.shields.io/badge/Add_to_Kiro-9046FF?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkxIiBoZWlnaHQ9IjIyNi44MTQiIHZpZXdCb3g9IjAgMCAxOTEgMjI2LjgxNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMzUuNjA5IDE3My4xNjVjLTIzLjExMSA1MS4yMzUgMjYuMTA2IDY0LjA2OCA2Mi4zOTYgMzQuMTA2IDEwLjY2IDMzLjYwNSA1MC42OTggOC41MzQgNjUuMDU5LTE3LjUxMSAzMS42MzQtNTcuMzgzIDE4Ljg2Mi0xMTUuOTM3IDE1LjU3OS0xMjguMDE3LTIyLjUwMi04Mi4zNTctMTM0LjkyOS04Mi40MjktMTU0LjI4MS40MTgtNC41MjMgMTQuNTA1LTQuNTk1IDMxLjAwMy03LjE2MSA0OC4xMzItMS4yOSA4LjYzMS0yLjE5OCAxNC4xNDUtNS41MzkgMjMuMjMtMS45MjEgNS4yMTgtNC41NTkgOS44NDktOC43MTQgMTcuNjY2LTguMjEzIDEyLjU0NS4xNTUgMzguMiAzMi42NSAyMi4wMDF6IiBmaWxsPSIjZmZmIi8+PHBhdGggZD0iTTEwMi42MDMgOTYuODk4Yy05LjIyOSAwLTEwLjYxMy0xMS4wMzEtMTAuNjEzLTE3LjU5NyAwLTUuOTMyIDEuMDc0LTEwLjY0OSAzLjA2Ny0xMy42NDRhOC41OCA4LjU4IDAgMCAxIDcuNTIxLTMuOTY0YzMuMjM2IDAgNi4wMDQgMS4zNjIgNy45NjEgNC4wMzYgMi4yMDkgMy4wNDUgMy4zOTEgNy43NTkgMy4zOTEgMTMuNTg2IDAgMTEuMDE3LTQuMjM4IDE3LjU5Ny0xMS4zNDEgMTcuNTk3em0zNy45NDggMGMtOS4yNCAwLTEwLjYyNC0xMS4wMzEtMTAuNjI0LTE3LjU5NyAwLTUuOTMyIDEuMDc0LTEwLjY0OSAzLjA4MS0xMy42NDRhOC41OCA4LjU4IDAgMCAxIDcuNTIxLTMuOTY0IDkuNTEgOS41MSAwIDAgMSA3Ljk1IDQuMDM2YzIuMjIgMy4wNDUgMy40MDIgNy43NTkgMy40MDIgMTMuNTg2IDAgMTEuMDE3LTQuMjM4IDE3LjU5Ny0xMS4zNDEgMTcuNTk3eiIgZmlsbD0iIzAwMCIvPlw8L3N2Zz4=&logoColor=white)](https://kiro.dev/launch/mcp/add?name=perplexity&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40perplexity-ai%2Fmcp-server%22%5D%2C%22env%22%3A%7B%22PERPLEXITY_API_KEY%22%3A%22your_key_here%22%7D%7D)
-&nbsp;
 [![npm version](https://img.shields.io/npm/v/%40perplexity-ai%2Fmcp-server?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@perplexity-ai/mcp-server)
 
 The official MCP server implementation for the Perplexity API Platform, providing AI assistants with real-time web search, reasoning, and research capabilities through Sonar models and the Search API.
 
-## Available Tools
-
-### **perplexity_search**
-Direct web search using the Perplexity Search API. Returns ranked search results with metadata, perfect for finding current information.
-
-### **perplexity_ask**
-General-purpose conversational AI with real-time web search using the `sonar-pro` model. Great for quick questions and everyday searches.
-
-### **perplexity_research**
-Deep, comprehensive research using the `sonar-deep-research` model. Ideal for thorough analysis and detailed reports.
-
-### **perplexity_reason**
-Advanced reasoning and problem-solving using the `sonar-reasoning-pro` model. Perfect for complex analytical tasks.
-
-> [!TIP]
-> Available as an optional parameter for **perplexity_reason** and **perplexity_research**: `strip_thinking`
->
-> Set to `true` to remove `<think>...</think>` tags from the response, saving context tokens. Default: `false`
-
-## Configuration
-
-### Get Your API Key
-
-1. Get your Perplexity API Key from the [API Portal](https://www.perplexity.ai/account/api/group)
-2. Replace `your_key_here` in the configurations below with your API key
-3. (Optional) Set timeout: `PERPLEXITY_TIMEOUT_MS=600000` (default: 5 minutes)
-4. (Optional) Set custom base URL: `PERPLEXITY_BASE_URL=https://your-custom-url.com` (default: https://api.perplexity.ai)
-5. (Optional) Set log level: `PERPLEXITY_LOG_LEVEL=DEBUG|INFO|WARN|ERROR` (default: ERROR)
-
-### Claude Code
-
-```bash
-claude mcp add perplexity --env PERPLEXITY_API_KEY="your_key_here" -- npx -y @perplexity-ai/mcp-server
-```
-
-Or install via plugin:
-```bash
-export PERPLEXITY_API_KEY="your_key_here"
-claude
-# Then run: /plugin marketplace add perplexityai/modelcontextprotocol
-# Then run: /plugin install perplexity
-```
-
-### Codex
-
-```bash
-codex mcp add perplexity --env PERPLEXITY_API_KEY="your_key_here" -- npx -y @perplexity-ai/mcp-server
-```
-
-### Cursor, Claude Desktop, Kiro, Windsurf, and VS Code
-
-Most clients can be configured manually using the same `mcpServers` wrapper in their client config (as shown for Cursor). If a client has a different schema, check its docs for the exact wrapper format.
-
-For manual setup, these clients all use the same `mcpServers` structure:
-
-| Client | Config File |
-|--------|-------------|
-| Cursor | `~/.cursor/mcp.json` |
-| Claude Desktop | `claude_desktop_config.json` |
-| Kiro | `.kiro/settings/mcp.json` |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
-| VS Code | `.vscode/mcp.json` |
-
-```json
-{
-  "mcpServers": {
-    "perplexity": {
-      "command": "npx",
-      "args": ["-y", "@perplexity-ai/mcp-server"],
-      "env": {
-        "PERPLEXITY_API_KEY": "your_key_here"
-      }
-    }
-  }
-}
-```
-
-### Proxy Setup (For Corporate Networks)
-
-If you are running this server at work—especially behind a company firewall or proxy—you may need to tell the program how to send its internet traffic through your network's proxy. Follow these steps:
-
-**1. Get your proxy details**
-
-- Ask your IT department for your HTTPS proxy address and port.
-- You may also need a username and password.
-
-**2. Set the proxy environment variable**
-
-The easiest and most reliable way for Perplexity MCP is to use `PERPLEXITY_PROXY`. For example:
-
-```bash
-export PERPLEXITY_PROXY=https://your-proxy-host:8080
-```
-
-If your proxy needs a username and password, use:
-
-```bash
-export PERPLEXITY_PROXY=https://username:password@your-proxy-host:8080
-```
-
-**3. Alternate: Standard environment variables**
-
-If you'd rather use the standard variables, we support `HTTPS_PROXY` and `HTTP_PROXY`.
-
-> [!NOTE]
-> The server checks proxy settings in this order: `PERPLEXITY_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY`. If none are set, it connects directly to the internet.
-> URLs must include `https://`. Typical ports are `8080`, `3128`, and `80`.
-
-### HTTP Server Deployment
-
-For cloud or shared deployments, run the server in HTTP mode.
-
-#### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PERPLEXITY_API_KEY` | Your Perplexity API key | *Required* |
-| `PERPLEXITY_BASE_URL` | Custom base URL for API requests | `https://api.perplexity.ai` |
-| `PORT` | HTTP server port | `8080` |
-| `BIND_ADDRESS` | Network interface to bind to. Defaults to loopback. Set to `0.0.0.0` to expose on all interfaces. | `127.0.0.1` |
-| `ALLOWED_ORIGINS` | CORS origins (comma-separated). Defaults to empty (no cross-origin browser requests). Set to an explicit allowlist (e.g. `https://app.example.com`) or to `*` to allow any origin. | *(empty)* |
-| `ALLOWED_HOSTS` | Additional `Host` header values to accept (comma-separated). Loopback hosts on `PORT` are always allowed. Add the public hostname when binding to `0.0.0.0`. | *(loopback only)* |
-
-#### Docker
-
-```bash
-docker build -t perplexity-mcp-server .
-docker run -p 8080:8080 -e PERPLEXITY_API_KEY=your_key_here perplexity-mcp-server
-```
-
-#### Node.js
-
-```bash
-export PERPLEXITY_API_KEY=your_key_here
-npm install && npm run build && npm run start:http
-```
-
-The server will be accessible at `http://localhost:8080/mcp`
-
-## Troubleshooting
-
-- **API Key Issues**: Ensure `PERPLEXITY_API_KEY` is set correctly
-- **Connection Errors**: Check your internet connection and API key validity
-- **Tool Not Found**: Make sure the package is installed and the command path is correct
-- **Timeout Errors**: For very long research queries, set `PERPLEXITY_TIMEOUT_MS` to a higher value
-- **Proxy Issues**: Verify your `PERPLEXITY_PROXY` or `HTTPS_PROXY` setup and ensure `api.perplexity.ai` isn't blocked by your firewall.
-- **EOF / Initialize Errors**: Some strict MCP clients fail because `npx` writes installation messages to stdout. Use `npx -yq` instead of `npx -y` to suppress this output.
-
-For support, visit [community.perplexity.ai](https://community.perplexity.ai) or [file an issue](https://github.com/perplexityai/modelcontextprotocol/issues).
-
----
+Full upstream documentation: <https://github.com/perplexityai/modelcontextprotocol>
